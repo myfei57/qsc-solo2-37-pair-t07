@@ -94,6 +94,17 @@ class ConsoleApp:
         router.get("/api/state", self._state, "full control snapshot")
         router.get("/api/config", self._config, "configured operating envelope")
         router.get("/api/temperatures", self._temperatures, "sensor map with latest values")
+        router.get(
+            "/api/sensors/{sensor_id}/lineage",
+            self._sensor_lineage,
+            "every mapping and calibration revision of one sensor",
+        )
+        router.get(
+            "/api/sensors/{sensor_id}/trace",
+            self._reading_trace,
+            "each reading with the mapping and calibration it was taken with",
+        )
+        router.get("/api/sensor-map/at/{generation}", self._sensor_map_at, "sensor map as of a generation")
         router.get("/api/generations", self._generations, "published generation lineages")
         router.get("/api/warranties", self._warranties, "confirmations, snapshots and baselines")
         router.get("/api/records", self._records, "committed or staged record stream")
@@ -164,6 +175,16 @@ class ConsoleApp:
 
     def _temperatures(self, params: dict[str, str], query: dict[str, str], body: dict[str, Any]) -> Any:
         return {"sensors": self.control.temperatures(), "flow": self.control.flowmeter.gain}
+
+    def _sensor_lineage(self, params: dict[str, str], query: dict[str, str], body: dict[str, Any]) -> Any:
+        return self.control.sensor_lineage(params["sensor_id"])
+
+    def _reading_trace(self, params: dict[str, str], query: dict[str, str], body: dict[str, Any]) -> Any:
+        limit = int(query["limit"]) if "limit" in query else None
+        return self.control.reading_trace(params["sensor_id"], limit=limit)
+
+    def _sensor_map_at(self, params: dict[str, str], query: dict[str, str], body: dict[str, Any]) -> Any:
+        return self.control.sensor_map_at(int(params["generation"]))
 
     def _generations(self, params: dict[str, str], query: dict[str, str], body: dict[str, Any]) -> Any:
         return self.control.generations.as_dict()
@@ -406,11 +427,13 @@ class ConsoleApp:
         )
 
     def _evaluate_window(self, params: dict[str, str], query: dict[str, str], body: dict[str, Any]) -> Any:
+        as_of = body.get("as_of_generation")
         return self.control.evaluate_window(
             _text(body, "sensor_id"),
             _integer(body, "count", 4),
             reason=_text(body, "reason", "operator"),
             kind=_text(body, "kind", "sterilization-window"),
+            as_of_generation=None if as_of is None else int(as_of),
         )
 
     def _record_state(self, params: dict[str, str], query: dict[str, str], body: dict[str, Any]) -> Any:

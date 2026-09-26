@@ -18,9 +18,11 @@ class Reading:
     unit: str
     timestamp: str
     generation: int
+    raw_value: float | None = None
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Reading":
+        raw = value.get("raw_value")
         return cls(
             sequence=int(value["sequence"]),
             channel=str(value["channel"]),
@@ -28,6 +30,7 @@ class Reading:
             unit=str(value["unit"]),
             timestamp=str(value["timestamp"]),
             generation=int(value["generation"]),
+            raw_value=None if raw is None else float(raw),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -38,6 +41,7 @@ class Reading:
             "unit": self.unit,
             "timestamp": self.timestamp,
             "generation": self.generation,
+            "raw_value": self.raw_value,
         }
 
 
@@ -61,8 +65,12 @@ class ReadingSeries:
         stored = self.store.try_read(self.document)
         if stored is None:
             return
-        latest = stored.payload.get("latest")
-        self._readings = [] if latest is None else [Reading.from_dict(latest)]
+        readings = stored.payload.get("readings")
+        if readings is None:
+            # Backwards compatibility with snapshots that kept only the tail.
+            latest = stored.payload.get("latest")
+            readings = [] if latest is None else [latest]
+        self._readings = [Reading.from_dict(item) for item in readings]
 
     def persist(self) -> None:
         self.store.write(
@@ -71,11 +79,19 @@ class ReadingSeries:
                 "channel": self.channel,
                 "limit": self.limit,
                 "summary": self.statistics(),
+                "readings": [reading.as_dict() for reading in self._readings],
                 "latest": None if not self._readings else self._readings[-1].as_dict(),
             },
         )
 
-    def append(self, value: float, *, unit: str = "", generation: int = 0) -> Reading:
+    def append(
+        self,
+        value: float,
+        *,
+        unit: str = "",
+        generation: int = 0,
+        raw_value: float | None = None,
+    ) -> Reading:
         reading = Reading(
             sequence=(self._readings[-1].sequence + 1) if self._readings else 1,
             channel=self.channel,
@@ -83,6 +99,7 @@ class ReadingSeries:
             unit=str(unit),
             timestamp=self.clock.timestamp(),
             generation=int(generation),
+            raw_value=None if raw_value is None else float(raw_value),
         )
         self._readings.append(reading)
         if len(self._readings) > self.limit:

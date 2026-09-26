@@ -49,7 +49,23 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("generations", help="print the published generation lineages")
     subparsers.add_parser("warranties", help="print confirmations, snapshots and baselines")
     subparsers.add_parser("batches", help="print the batch registry")
-    subparsers.add_parser("sensors", help="print the sensor map")
+    subparsers.add_parser("sensors", help="print the current sensor map")
+
+    lineage = subparsers.add_parser(
+        "sensor-lineage",
+        help="print every mapping and calibration revision of one sensor",
+    )
+    lineage.add_argument("sensor_id")
+
+    trace = subparsers.add_parser(
+        "sensor-trace",
+        help="print each reading with the mapping and calibration it was taken with",
+    )
+    trace.add_argument("sensor_id")
+    trace.add_argument("--limit", type=int)
+
+    map_at = subparsers.add_parser("sensor-map-at", help="print the sensor map as of a generation")
+    map_at.add_argument("generation", type=int)
 
     alarms = subparsers.add_parser("alarms", help="inspect the alarm board")
     alarms.add_argument("--limit", type=int, default=20)
@@ -160,6 +176,15 @@ def main(argv: Sequence[str] | None = None, *, server_factory: type[ConsoleServe
         return 0
     if command == "sensors":
         _json_print({"sensors": control.temperatures(), "flow_gain": control.flowmeter.gain})
+        return 0
+    if command == "sensor-lineage":
+        _json_print(control.sensor_lineage(args.sensor_id))
+        return 0
+    if command == "sensor-trace":
+        _json_print(control.reading_trace(args.sensor_id, limit=args.limit))
+        return 0
+    if command == "sensor-map-at":
+        _json_print(control.sensor_map_at(args.generation))
         return 0
     if command == "alarms":
         _json_print(

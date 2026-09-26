@@ -119,3 +119,66 @@ def test_temperature_history_records_every_reading(tmp_path: Path) -> None:
     history = runtime.thermometry.history(STERILE_SENSOR)
     assert [item.value for item in history] == [136.0, 137.0]
     assert runtime.thermometry.latest(STERILE_SENSOR).value == 137.0
+
+
+def test_old_readings_keep_the_position_and_calibration_they_were_taken_with(tmp_path: Path) -> None:
+    runtime = manual_runtime(tmp_path)
+    old_generation = runtime.thermometry.sensor(STERILE_SENSOR).generation
+    runtime.control.record_temperature(STERILE_SENSOR, 100.0, reason="last week")
+    runtime.control.remap_sensor(STERILE_SENSOR, "sterilization-inlet", reason="probe moved")
+    runtime.control.recalibrate_temperature(STERILE_SENSOR, 1.2, 0.0, reason="post-move calibration")
+
+    reading = runtime.thermometry.history(STERILE_SENSOR)[0]
+    assert reading.generation == old_generation
+    provenance = runtime.thermometry.provenance(reading)
+    assert provenance["position"] == "sterilization-outlet"
+    assert provenance["gain"] == 1.0
+    assert provenance["mapping_current"] is False
+    # The stored value is not recomputed under the new mapping or calibration.
+    assert reading.value == 100.0
+    assert reading.raw_value == 100.0
+
+
+def test_replay_judges_a_window_with_the_envelope_of_the_pinned_generation(tmp_path: Path) -> None:
+    runtime = manual_runtime(tmp_path)
+    for raw in (136.0, 136.5, 137.0):
+        runtime.control.record_temperature(STERILE_SENSOR, raw, reason="last week")
+    old_generation = runtime.thermometry.sensor(STERILE_SENSOR).generation
+    runtime.control.evaluate_window(STERILE_SENSOR, 3, reason="last week")
+    runtime.control.remap_sensor(STERILE_SENSOR, "sterilization-inlet", reason="probe moved")
+
+    replay = runtime.control.evaluate_window(
+        STERILE_SENSOR,
+        3,
+        reason="historical trace",
+        as_of_generation=old_generation,
+    )
+    assert replay["replay"] is True
+    assert replay["position"] == "sterilization-outlet"
+    assert replay["verdict"] == "pass"
+    # A read-only replay never appends a new verdict.
+    assert runtime.control.decision_history(kind="sterilization-window-replay") == []
+    assert len(runtime.control.decision_history(kind="sterilization-window")) == 1
+
+
+def test_reading_trace_and_lineage_survive_a_restart(tmp_path: Path) -> None:
+    first = manual_runtime(tmp_path)
+    old_generation = first.thermometry.sensor(STERILE_SENSOR).generation
+    first.control.record_temperature(STERILE_SENSOR, 100.0, reason="last week")
+    first.control.remap_sensor(STERILE_SENSOR, "sterilization-inlet", reason="probe moved")
+
+    second = manual_runtime(tmp_path)
+    trace = second.control.reading_trace(STERILE_SENSOR)
+    assert trace["readings"][0]["provenance"]["generation"] == old_generation
+    assert trace["readings"][0]["provenance"]["position"] == "sterilization-outlet"
+    assert second.control.sensor_map_at(old_generation)["map"][STERILE_SENSOR] == "sterilization-outlet"
+    assert second.control.sensor_lineage(STERILE_SENSOR)["current"]["position"] == "sterilization-inlet"
+
+
+def test_a_channel_commissioned_later_is_absent_from_an_earlier_map(tmp_path: Path) -> None:
+    runtime = manual_runtime(tmp_path)
+    before = runtime.generations.generation("sensors")
+    runtime.thermometry.register_sensor("TS-NEW", "inlet-a", reason="extension")
+    assert "TS-NEW" not in runtime.thermometry.map_at(before)
+    assert runtime.thermometry.map_at(runtime.generations.generation("sensors"))["TS-NEW"] == "inlet-a"
+

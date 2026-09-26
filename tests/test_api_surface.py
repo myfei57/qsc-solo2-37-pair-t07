@@ -16,7 +16,10 @@ def test_every_get_route_answers_with_a_json_payload(tmp_path: Path) -> None:
     for route in app.route_inventory():
         if route["method"] != "GET":
             continue
-        path = route["pattern"].replace("{action}", "sterilization-ramp")
+        path = route["pattern"]
+        for parameter in route.get("parameters", []):
+            sample = {"action": "sterilization-ramp", "sensor_id": "TS-STERILE", "generation": "1"}[parameter]
+            path = path.replace("{" + parameter + "}", sample)
         status, payload = app.handle("GET", path, {}, {})
         assert status == 200
         assert isinstance(payload, dict)

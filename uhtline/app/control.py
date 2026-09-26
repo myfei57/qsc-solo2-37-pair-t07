@@ -411,6 +411,31 @@ class LineControl:
         self.warranties.expire_stale()
         return sensor.as_dict()
 
+    def sensor_lineage(self, sensor_id: str) -> dict[str, Any]:
+        """Every mapping/calibration revision the channel ever carried."""
+
+        history = self.thermometry.sensor_history(sensor_id)
+        return {
+            "sensor_id": str(sensor_id),
+            "current": self.thermometry.sensor(sensor_id).as_dict(),
+            "revisions": [sensor.as_dict() for sensor in history],
+        }
+
+    def sensor_map_at(self, generation: int) -> dict[str, Any]:
+        return {
+            "generation": int(generation),
+            "map": self.thermometry.map_at(int(generation)),
+        }
+
+    def reading_trace(self, sensor_id: str, *, limit: int | None = None) -> dict[str, Any]:
+        """Each reading paired with the mapping and calibration it was taken with."""
+
+        return {
+            "sensor_id": str(sensor_id),
+            "current_position": self.thermometry.position_of(sensor_id),
+            "readings": self.thermometry.history_as_recorded(sensor_id, limit=limit),
+        }
+
     def recalibrate_flow(self, gain: float, offset: float = 0.0, *, reason: str) -> dict[str, Any]:
         revision = self.flowmeter.calibrate(gain, offset, reason=reason)
         self.warranties.expire_stale()
@@ -453,20 +478,33 @@ class LineControl:
         *,
         reason: str,
         kind: str = "sterilization-window",
+        as_of_generation: int | None = None,
     ) -> dict[str, Any]:
         readings = self.thermometry.series(str(sensor_id)).window(count)
-        outcome = self.window.evaluate(str(sensor_id), readings)
-        generation = self.generations.generation("sensors")
+        if as_of_generation is None:
+            envelope = self.config.temperature
+            generation = self.generations.generation("sensors")
+        else:
+            # Historical replay: judge the stored readings with the envelope
+            # in force at the pinned generation, never with today's limits.
+            # A replay is read-only and never appends to the decision log.
+            envelope = self.thermometry.envelope_at(int(as_of_generation))
+            generation = int(as_of_generation)
+        outcome = WindowDecision(envelope).evaluate(str(sensor_id), readings)
         payload = outcome.as_dict()
-        self.decisions.record(
-            kind,
-            str(sensor_id),
-            outcome.verdict,
-            detail="; ".join(outcome.reasons),
-            batch_id=self._active_batch_id(),
-            generation=generation,
-        )
-        self.timeline.record(kind, payload, generation=generation)
+        payload["generation"] = generation
+        payload["replay"] = as_of_generation is not None
+        payload["position"] = self.thermometry.position_of(str(sensor_id), generation=generation)
+        if as_of_generation is None:
+            self.decisions.record(
+                kind,
+                str(sensor_id),
+                outcome.verdict,
+                detail="; ".join(outcome.reasons),
+                batch_id=self._active_batch_id(),
+                generation=generation,
+            )
+            self.timeline.record(kind, payload, generation=generation)
         self._count("decision.evaluate")
         return payload
 
@@ -631,16 +669,22 @@ class LineControl:
 
     def temperatures(self, sensor_ids: Sequence[str] | None = None) -> dict[str, Any]:
         identifiers = list(sensor_ids) if sensor_ids else [sensor.sensor_id for sensor in self.thermometry.sensors()]
-        return {
-            identifier: {
+        report: dict[str, Any] = {}
+        for identifier in identifiers:
+            # The current-state view follows the head generation: the latest
+            # sample taken under the mapping that is in force right now.
+            current_generation = self.thermometry.sensor(identifier).generation
+            current_readings = self.thermometry.series(identifier).filtered(
+                generation=current_generation,
+                limit=1,
+            )
+            report[identifier] = {
                 "position": self.thermometry.position_of(identifier),
-                "latest": None
-                if self.thermometry.latest(identifier) is None
-                else self.thermometry.latest(identifier).value,
+                "generation": current_generation,
+                "latest": None if not current_readings else current_readings[-1].value,
                 "statistics": self.thermometry.series(identifier).statistics(),
             }
-            for identifier in identifiers
-        }
+        return report
 
 
 __all__ = ["ACTION_GATES", "ACTION_LATCHES", "LineControl"]
