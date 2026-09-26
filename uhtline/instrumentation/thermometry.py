@@ -11,7 +11,7 @@ from ..core.ids import validate_token
 from ..errors import NotFoundError, StaleGenerationError, ValidationError
 from ..persistence.store import DurableStore
 from ..telemetry.readings import Reading, ReadingSeries
-from ..versioning.generations import GenerationRegistry
+from ..versioning.generations import GenerationRegistry, ParameterRevision
 
 
 @dataclass(frozen=True)
@@ -135,15 +135,76 @@ class Thermometry:
         return [self._sensors[key] for key in sorted(self._sensors)]
 
     def sensor_history(self, sensor_id: str) -> list[Sensor]:
-        return [self.sensor(sensor_id)]
+        """Every mapping and calibration this sensor was ever published with."""
+
+        key = self.sensor(sensor_id).sensor_id
+        history: list[Sensor] = []
+        for revision in self.generations.revisions(self.scope):
+            if revision.payload.get("sensor") != key:
+                continue
+            sensor_map = revision.payload.get("sensor_map", {})
+            history.append(
+                Sensor(
+                    sensor_id=key,
+                    position=str(sensor_map.get(key, self._sensors[key].position)),
+                    gain=float(revision.payload["gain"]),
+                    offset=float(revision.payload["offset"]),
+                    generation=revision.generation,
+                )
+            )
+        return history or [self._sensors[key]]
 
     def current_map(self) -> dict[str, str]:
         return {sensor.sensor_id: sensor.position for sensor in self.sensors()}
 
+    def _revision_at(self, generation: int) -> ParameterRevision:
+        """Latest published sensor revision at or before the requested generation."""
+
+        selected: ParameterRevision | None = None
+        for revision in self.generations.revisions(self.scope):
+            if revision.generation > int(generation):
+                break
+            selected = revision
+        if selected is None:
+            raise StaleGenerationError(
+                "no sensor generation was published at or before the requested one",
+                scope=self.scope,
+                generation=int(generation),
+            )
+        return selected
+
+    def _calibration_at(self, sensor_id: str, generation: int) -> Sensor:
+        """Rebuild the mapping and calibration one sensor had at a past generation."""
+
+        selected = self._revision_at(generation)
+        sensor_map = selected.payload.get("sensor_map", {})
+        gain: float | None = None
+        offset: float | None = None
+        for revision in self.generations.revisions(self.scope):
+            if revision.generation > int(generation):
+                break
+            if revision.payload.get("sensor") == sensor_id:
+                gain = float(revision.payload["gain"])
+                offset = float(revision.payload["offset"])
+        if sensor_id not in sensor_map or gain is None or offset is None:
+            raise StaleGenerationError(
+                "sensor had no published calibration at that generation",
+                sensor=sensor_id,
+                generation=int(generation),
+            )
+        return Sensor(
+            sensor_id=sensor_id,
+            position=str(sensor_map[sensor_id]),
+            gain=gain,
+            offset=offset,
+            generation=int(generation),
+        )
+
     def map_at(self, generation: int) -> dict[str, str]:
         """Reconstruct the sensor map as it stood at a published generation."""
 
-        return self.current_map()
+        revision = self._revision_at(generation)
+        return {str(key): str(value) for key, value in revision.payload.get("sensor_map", {}).items()}
 
     def position_of(self, sensor_id: str) -> str:
         return self.sensor(sensor_id).position
@@ -159,8 +220,11 @@ class Thermometry:
     def convert(self, sensor_id: str, raw_c: float, *, generation: int | None = None) -> float:
         """Apply the calibration of the requested generation to a raw value."""
 
-        self.sensor(sensor_id)
-        selected = self.sensor(sensor_id)
+        key = self.sensor(sensor_id).sensor_id
+        if generation is None:
+            selected = self._sensors[key]
+        else:
+            selected = self._calibration_at(key, int(generation))
         return round(float(raw_c) * selected.gain + selected.offset, 6)
 
     def record_reading(self, sensor_id: str, raw_c: float, *, unit: str = "degC") -> Reading:

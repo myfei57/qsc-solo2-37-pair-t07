@@ -61,8 +61,11 @@ class ReadingSeries:
         stored = self.store.try_read(self.document)
         if stored is None:
             return
-        latest = stored.payload.get("latest")
-        self._readings = [] if latest is None else [Reading.from_dict(latest)]
+        items = stored.payload.get("readings")
+        if items is None:
+            latest = stored.payload.get("latest")
+            items = [] if latest is None else [latest]
+        self._readings = [Reading.from_dict(item) for item in items][-self.limit :]
 
     def persist(self) -> None:
         self.store.write(
@@ -71,6 +74,7 @@ class ReadingSeries:
                 "channel": self.channel,
                 "limit": self.limit,
                 "summary": self.statistics(),
+                "readings": [reading.as_dict() for reading in self._readings],
                 "latest": None if not self._readings else self._readings[-1].as_dict(),
             },
         )
